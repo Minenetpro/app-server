@@ -10,7 +10,7 @@ import { deployWorkspace, getRunStatus, pullWorkspace, pushWorkspace, workspaceS
 import type { JsonObject, LocalState, StoredProfile } from "./types";
 
 const DEFAULT_API_BASE_URL =
-  (process.env.MINENET_API_BASE_URL || "https://prod.minenetpro.app").replace(/\/+$/, "");
+  (process.env.MINENET_API_BASE_URL || "https://www.minenet.pro").replace(/\/+$/, "");
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

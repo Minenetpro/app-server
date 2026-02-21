@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.0.3 - 2026-02-21
+
+### Changed
+- Switched default daemon API base URL to the main app domain:
+  - from `https://prod.minenetpro.app`
+  - to `https://www.minenet.pro`
+
+### Agent Notes
+- Keep `DEFAULT_API_BASE_URL` aligned with the primary app domain that serves `/api/cli/v1/*` and `/api/client/v1/*`.
+- Keep `MINENET_API_BASE_URL` as the runtime override for non-production environments.
+
 ## v1.0.2 - 2026-02-21
 
 ### Fixed
