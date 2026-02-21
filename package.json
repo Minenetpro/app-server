@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "dev": "bun run index.ts",
-    "start": "bun run index.ts"
+    "start": "bun run index.ts",
+    "build:bin": "bun build --compile index.ts --outfile dist/minenet-app-server"
   },
   "devDependencies": {
     "@types/bun": "latest"
