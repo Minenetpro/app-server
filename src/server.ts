@@ -271,7 +271,6 @@ export async function startServer() {
             workspacePath:
               typeof body.workspacePath === "string" ? body.workspacePath : undefined,
             selector: typeof body.selector === "string" ? body.selector : undefined,
-            prune: body.prune === undefined ? true : Boolean(body.prune),
           });
 
           return jsonResponse(result);

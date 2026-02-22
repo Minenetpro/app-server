@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.0.4 - 2026-02-21
+
+### Fixed
+- Migrated deployment API client calls to the new `deployments` namespace:
+  - `/api/client/v1/deployments/configurations`
+  - `/api/client/v1/deployments/apply`
+  - `/api/client/v1/deployments/runs/{runId}`
+- Switched deployment configuration update from `PUT` to `PATCH`.
+- Removed deprecated `prune` field from apply requests and daemon deploy handler.
+- Updated workspace conflict/hash tracking to use `spec_hash` (with fallback support for legacy `config_hash`).
+
+### Changed
+- Expanded deployment run typing to current lifecycle/status/stage/event payloads.
+- Added optional `idempotency_key` support in apply client request shape.
+
+### Agent Notes
+- Keep app-server client API paths aligned with `minenet-pro` route namespace changes (`deployment` -> `deployments`).
+- Treat `spec_hash` as canonical; keep `config_hash` fallback only for backward compatibility.
+- If deploy apply contract changes, update both:
+  - `src/api.ts` request body for `applyConfiguration`
+  - `src/server.ts` + `src/workspace.ts` deploy input plumbing
+
 ## v1.0.3 - 2026-02-21
 
 ### Changed

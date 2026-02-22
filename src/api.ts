@@ -35,7 +35,7 @@ export class ApiError extends Error {
 type JsonObject = Record<string, unknown>;
 
 type RequestOptions = {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: JsonObject | string;
   token?: string;
 };
@@ -157,14 +157,14 @@ export class MinenetApiClient {
   }
 
   async listDeploymentConfigurations(): Promise<ListConfigurationsResponse> {
-    return this.request<ListConfigurationsResponse>("/api/client/v1/deployment/configurations", {
+    return this.request<ListConfigurationsResponse>("/api/client/v1/deployments/configurations", {
       method: "GET",
     });
   }
 
   async getDeploymentConfiguration(configurationId: string): Promise<GetConfigurationResponse> {
     return this.request<GetConfigurationResponse>(
-      `/api/client/v1/deployment/configurations/${configurationId}`,
+      `/api/client/v1/deployments/configurations/${configurationId}`,
       { method: "GET" },
     );
   }
@@ -176,9 +176,9 @@ export class MinenetApiClient {
     yaml?: string;
   }): Promise<UpdateConfigurationResponse> {
     return this.request<UpdateConfigurationResponse>(
-      `/api/client/v1/deployment/configurations/${input.configurationId}`,
+      `/api/client/v1/deployments/configurations/${input.configurationId}`,
       {
-        method: "PUT",
+        method: "PATCH",
         body: {
           name: input.name,
           description: input.description,
@@ -190,19 +190,23 @@ export class MinenetApiClient {
 
   async applyConfiguration(input: {
     configurationId: string;
-    prune: boolean;
+    idempotencyKey?: string;
   }): Promise<DeployApplyResponse> {
-    return this.request<DeployApplyResponse>("/api/client/v1/deployment", {
+    return this.request<DeployApplyResponse>("/api/client/v1/deployments/apply", {
       method: "POST",
       body: {
         configuration_id: input.configurationId,
-        prune: input.prune,
+        ...(input.idempotencyKey
+          ? {
+              idempotency_key: input.idempotencyKey,
+            }
+          : {}),
       },
     });
   }
 
   async getDeploymentRun(runId: string): Promise<DeployRunDetails> {
-    return this.request<DeployRunDetails>(`/api/client/v1/deployment/runs/${runId}`, {
+    return this.request<DeployRunDetails>(`/api/client/v1/deployments/runs/${runId}`, {
       method: "GET",
     });
   }

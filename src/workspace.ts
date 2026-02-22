@@ -93,6 +93,20 @@ function hasConflict(
   return localChanged && remoteChanged;
 }
 
+function getConfigurationHash(configuration: DeploymentConfiguration): string {
+  if (configuration.spec_hash) {
+    return configuration.spec_hash;
+  }
+
+  if (configuration.config_hash) {
+    return configuration.config_hash;
+  }
+
+  throw new Error(
+    `Configuration ${configuration.id} is missing hash fields (spec_hash/config_hash)`,
+  );
+}
+
 function normalizeWorkspaceRoot(
   cwd: string,
   workspacePath: string | undefined,
@@ -166,7 +180,8 @@ export async function pullWorkspace(input: {
     const localContent = await readFileIfPresent(configPath);
     const localHash = localContent ? computeLocalHash(localContent) : null;
 
-    if (existing && hasConflict(existing, localHash, configuration.config_hash) && !input.force) {
+    const remoteHash = getConfigurationHash(configuration);
+    if (existing && hasConflict(existing, localHash, remoteHash) && !input.force) {
       conflicts.push({
         configurationId: configuration.id,
         configurationName: configuration.name,
@@ -206,7 +221,7 @@ export async function pullWorkspace(input: {
       configurationId: item.configuration.id,
       configurationName: item.configuration.name,
       directoryName: item.directoryName,
-      lastPulledRemoteHash: item.configuration.config_hash,
+      lastPulledRemoteHash: getConfigurationHash(item.configuration),
       lastLocalHash: item.localHash,
       updatedAt: Date.now(),
     };
@@ -281,8 +296,9 @@ export async function pushWorkspace(input: {
 
     const localHash = computeLocalHash(localContent);
     const remote = await client.getDeploymentConfiguration(entry.configurationId);
+    const remoteHash = getConfigurationHash(remote.configuration);
 
-    if (hasConflict(entry, localHash, remote.configuration.config_hash) && !input.force) {
+    if (hasConflict(entry, localHash, remoteHash) && !input.force) {
       conflicts.push({
         configurationId: entry.configurationId,
         configurationName: entry.configurationName,
@@ -294,7 +310,7 @@ export async function pushWorkspace(input: {
 
     if (
       entry.lastLocalHash === localHash &&
-      entry.lastPulledRemoteHash === remote.configuration.config_hash
+      entry.lastPulledRemoteHash === remoteHash
     ) {
       skipped.push(entry.configurationId);
       continue;
@@ -306,7 +322,7 @@ export async function pushWorkspace(input: {
       yaml: localContent,
     });
 
-    entry.lastPulledRemoteHash = result.configuration.config_hash;
+    entry.lastPulledRemoteHash = getConfigurationHash(result.configuration);
     entry.lastLocalHash = localHash;
     entry.configurationName = result.configuration.name;
     entry.updatedAt = Date.now();
@@ -340,7 +356,6 @@ export async function deployWorkspace(input: {
   cwd: string;
   workspacePath?: string;
   selector?: string;
-  prune: boolean;
 }) {
   const workspaceRoot = normalizeWorkspaceRoot(
     input.cwd,
@@ -365,7 +380,6 @@ export async function deployWorkspace(input: {
   for (const target of targets) {
     const result = await client.applyConfiguration({
       configurationId: target.configurationId,
-      prune: input.prune,
     });
 
     queued.push({

@@ -47,11 +47,11 @@ export type WorkspaceManifest = {
 export type DeploymentConfiguration = {
   id: string;
   team_id: string;
-  group_id: string;
   name: string;
   description: string | null;
   yaml: string;
-  config_hash: string;
+  spec_hash: string;
+  config_hash?: string;
   resource_count: number;
   created_at: number;
   updated_at: number;
@@ -75,46 +75,79 @@ export type DeployApplyResponse = {
   ok: boolean;
   run: {
     id: string;
-    status: string;
+    status: DeploymentRunStatus;
     configuration_id: string;
-    group_id: string;
-    prune: boolean;
     resource_count: number;
-    summary?: unknown;
+    queue_position: number | null;
+    created_at: number;
+    server_count?: number;
+    proxy_count?: number;
+    swiftbase_count?: number;
   };
+};
+
+export type DeploymentRunStatus =
+  | "queued"
+  | "planning"
+  | "executing"
+  | "finalizing"
+  | "succeeded"
+  | "failed"
+  | "canceled"
+  | "running"
+  | "completed";
+
+export type DeploymentRunStage = "planning" | "executing" | "finalizing" | null;
+
+export type DeploymentRunSummary = {
+  create: number;
+  update: number;
+  replace: number;
+  delete: number;
+  noop: number;
+  succeeded?: number;
+  success?: number;
+  failed: number;
 };
 
 export type DeployRunDetails = {
   run: {
     id: string;
-    status: "queued" | "running" | "completed" | "failed";
+    status: DeploymentRunStatus;
+    stage: DeploymentRunStage;
     configuration_id: string;
-    group_id: string;
-    prune: boolean;
-    config_hash: string;
+    spec_hash: string;
     resource_count: number;
-    summary: {
-      create: number;
-      update: number;
-      replace: number;
-      delete: number;
-      noop: number;
-      success: number;
-      failed: number;
-    } | null;
+    queue_position: number | null;
+    summary: DeploymentRunSummary | null;
+    checkpoint: unknown;
     created_at: number;
     started_at: number | null;
     completed_at: number | null;
     error: string | null;
+    failure_class: string | null;
   };
   resources: Array<{
     resource_key: string;
     resource_type: string;
     action: string;
-    status: string;
+    status: "pending" | "running" | "succeeded" | "failed";
     attempt: number;
+    desired: unknown;
+    before: unknown;
+    after: unknown;
+    log: unknown;
     error: string | null;
+    started_at: number | null;
+    completed_at: number | null;
     updated_at: number;
+  }>;
+  events: Array<{
+    event_type: string;
+    stage: DeploymentRunStage;
+    message: string | null;
+    data: unknown;
+    created_at: number;
   }>;
 };
 
