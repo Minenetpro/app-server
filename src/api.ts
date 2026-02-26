@@ -1,4 +1,6 @@
 import type {
+  CreateConfigurationResponse,
+  DeleteConfigurationResponse,
   DeployApplyResponse,
   DeployRunDetails,
   DeploymentConfiguration,
@@ -185,6 +187,28 @@ export class MinenetApiClient {
           yaml: input.yaml,
         },
       },
+    );
+  }
+
+  async createDeploymentConfiguration(input: {
+    name: string;
+    description?: string;
+    yaml: string;
+  }): Promise<CreateConfigurationResponse> {
+    return this.request<CreateConfigurationResponse>("/api/client/v1/deployments/configurations", {
+      method: "POST",
+      body: {
+        name: input.name,
+        description: input.description,
+        yaml: input.yaml,
+      },
+    });
+  }
+
+  async deleteDeploymentConfiguration(configurationId: string): Promise<DeleteConfigurationResponse> {
+    return this.request<DeleteConfigurationResponse>(
+      `/api/client/v1/deployments/configurations/${configurationId}`,
+      { method: "DELETE" },
     );
   }
 

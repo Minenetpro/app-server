@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.0.5 - 2026-02-26
+
+### Added
+- Workspace push now tracks top-level workspace config directories and reconciles remote deployment configurations accordingly:
+  - create remote configurations for new local `<directory>/config.yml`
+  - update existing mapped configurations
+  - delete remote configurations when mapped local directories are removed
+- Added deployments API client methods/types for creating and deleting configurations.
+
+### Changed
+- Push target resolution now combines manifest-backed entries with local directory discovery so newly created config folders are included without a prior pull.
+- Push responses now include `created`, `deleted`, and `failed` sections in addition to existing update/conflict/skipped data.
+- Updated `dev` script to run `bun run index.ts --watch` for faster local iteration.
+
+### Fixed
+- Captured API failure metadata during push operations and propagated per-item failure reasons/codes instead of collapsing errors.
+- Added parsing for validation issue arrays (`issues[]`) from API error details so CLI can render field-level validation messages.
+
+### Agent Notes
+- Keep workspace reconciliation behavior aligned with directory-level ownership model (`<workspace>/<directory>/config.yml`).
+- Preserve non-destructive conflict behavior: return structured conflicts/failures and allow caller UX to decide retry/force strategy.
+- If deployments configuration API contracts change, update all three together:
+  - `src/api.ts` client methods
+  - `src/types.ts` response/failure types
+  - `src/workspace.ts` push reconciliation + error mapping
+
 ## v1.0.4 - 2026-02-21
 
 ### Fixed

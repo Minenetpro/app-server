@@ -71,6 +71,22 @@ export type UpdateConfigurationResponse = {
   configuration: DeploymentConfiguration;
 };
 
+export type CreateConfigurationResponse = {
+  ok: boolean;
+  configuration: DeploymentConfiguration;
+};
+
+export type DeleteConfigurationResponse = {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  details?: {
+    compute?: number;
+    swiftbase?: number;
+    total?: number;
+  };
+};
+
 export type DeployApplyResponse = {
   ok: boolean;
   run: {
@@ -181,4 +197,16 @@ export type WorkspaceConflict = {
   configurationName: string;
   directoryName: string;
   reason: string;
+};
+
+export type WorkspacePushFailure = {
+  configurationId?: string;
+  directoryName: string;
+  operation: "create" | "update" | "delete";
+  reason: string;
+  code?: string;
+  validationIssues?: Array<{
+    path?: string;
+    message: string;
+  }>;
 };

@@ -1,7 +1,7 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { createApiClient } from "./api";
+import { ApiError, createApiClient } from "./api";
 import { sha256Hex, slugify } from "./hash";
 import {
   loadWorkspaceManifest,
@@ -13,6 +13,7 @@ import type {
   WorkspaceConflict,
   WorkspaceManifest,
   WorkspaceManifestEntry,
+  WorkspacePushFailure,
 } from "./types";
 
 function ensureTrailingNewline(value: string): string {
@@ -257,6 +258,98 @@ function resolveTargets(
   );
 }
 
+async function listTopLevelConfigDirectories(workspaceRoot: string): Promise<string[]> {
+  const entries = await readdir(workspaceRoot, { withFileTypes: true });
+  const directories: string[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    if (entry.name === ".minenet") {
+      continue;
+    }
+
+    if (existsSync(getConfigFilePath(workspaceRoot, entry.name))) {
+      directories.push(entry.name);
+    }
+  }
+
+  return directories.sort((left, right) => left.localeCompare(right));
+}
+
+function resolveLocalDirectoryTargets(
+  localDirectoryNames: string[],
+  selector: string | undefined,
+): string[] {
+  if (!selector || !selector.trim()) {
+    return localDirectoryNames;
+  }
+
+  const clean = selector.trim();
+  return localDirectoryNames.filter(
+    (directoryName) =>
+      directoryName === clean || basename(directoryName) === clean,
+  );
+}
+
+function toPushFailure(
+  error: unknown,
+  base: Omit<WorkspacePushFailure, "reason" | "code">,
+): WorkspacePushFailure {
+  if (error instanceof ApiError) {
+    let validationIssues: WorkspacePushFailure["validationIssues"];
+    if (
+      error.details &&
+      typeof error.details === "object" &&
+      "issues" in error.details &&
+      Array.isArray((error.details as { issues?: unknown }).issues)
+    ) {
+      const parsedIssues = (error.details as { issues: unknown[] }).issues
+        .map((issue) => {
+          if (!issue || typeof issue !== "object") {
+            return null;
+          }
+
+          const record = issue as Record<string, unknown>;
+          if (typeof record.message !== "string") {
+            return null;
+          }
+
+          return {
+            path: typeof record.path === "string" ? record.path : undefined,
+            message: record.message,
+          };
+        })
+        .filter((issue): issue is { path?: string; message: string } => Boolean(issue));
+
+      if (parsedIssues.length > 0) {
+        validationIssues = parsedIssues;
+      }
+    }
+
+    return {
+      ...base,
+      reason: error.message,
+      code: error.code ?? undefined,
+      validationIssues,
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      ...base,
+      reason: error.message,
+    };
+  }
+
+  return {
+    ...base,
+    reason: "Unexpected error",
+  };
+}
+
 export async function pushWorkspace(input: {
   profile: StoredProfile;
   cwd: string;
@@ -277,16 +370,46 @@ export async function pushWorkspace(input: {
   }
 
   const client = createApiClient(input.profile.apiBaseUrl, input.profile.token);
-  const targets = resolveTargets(manifest, input.selector);
-  if (targets.length === 0) {
+  const manifestTargets = resolveTargets(manifest, input.selector);
+  const localConfigDirectories = await listTopLevelConfigDirectories(workspaceRoot);
+  const localConfigDirectorySet = new Set(localConfigDirectories);
+  const localDirectoryTargets = resolveLocalDirectoryTargets(
+    localConfigDirectories,
+    input.selector,
+  );
+
+  if (
+    input.selector &&
+    input.selector.trim() &&
+    manifestTargets.length === 0 &&
+    localDirectoryTargets.length === 0
+  ) {
     throw new Error("No matching configurations found in workspace.");
   }
 
+  const manifestDirectoryMap = new Map<string, WorkspaceManifestEntry>();
+  for (const entry of Object.values(manifest.entries)) {
+    manifestDirectoryMap.set(entry.directoryName, entry);
+  }
+
+  const updateTargets = manifestTargets.filter((entry) =>
+    localConfigDirectorySet.has(entry.directoryName),
+  );
+  const deleteTargets = manifestTargets.filter(
+    (entry) => !localConfigDirectorySet.has(entry.directoryName),
+  );
+  const createDirectories = localDirectoryTargets.filter(
+    (directoryName) => !manifestDirectoryMap.has(directoryName),
+  );
+
   const conflicts: WorkspaceConflict[] = [];
   const updated: string[] = [];
+  const created: string[] = [];
+  const deleted: string[] = [];
   const skipped: string[] = [];
+  const failed: WorkspacePushFailure[] = [];
 
-  for (const entry of targets) {
+  for (const entry of updateTargets) {
     const configPath = getConfigFilePath(workspaceRoot, entry.directoryName);
     const localContent = await readFileIfPresent(configPath);
     if (!localContent) {
@@ -295,8 +418,20 @@ export async function pushWorkspace(input: {
     }
 
     const localHash = computeLocalHash(localContent);
-    const remote = await client.getDeploymentConfiguration(entry.configurationId);
-    const remoteHash = getConfigurationHash(remote.configuration);
+    let remoteHash: string;
+    try {
+      const remote = await client.getDeploymentConfiguration(entry.configurationId);
+      remoteHash = getConfigurationHash(remote.configuration);
+    } catch (error) {
+      failed.push(
+        toPushFailure(error, {
+          configurationId: entry.configurationId,
+          directoryName: entry.directoryName,
+          operation: "update",
+        }),
+      );
+      continue;
+    }
 
     if (hasConflict(entry, localHash, remoteHash) && !input.force) {
       conflicts.push({
@@ -316,38 +451,115 @@ export async function pushWorkspace(input: {
       continue;
     }
 
-    const result = await client.updateDeploymentConfiguration({
-      configurationId: entry.configurationId,
-      name: entry.configurationName,
-      yaml: localContent,
-    });
+    try {
+      const result = await client.updateDeploymentConfiguration({
+        configurationId: entry.configurationId,
+        name: entry.configurationName,
+        yaml: localContent,
+      });
 
-    entry.lastPulledRemoteHash = getConfigurationHash(result.configuration);
-    entry.lastLocalHash = localHash;
-    entry.configurationName = result.configuration.name;
-    entry.updatedAt = Date.now();
-    updated.push(entry.configurationId);
+      entry.lastPulledRemoteHash = getConfigurationHash(result.configuration);
+      entry.lastLocalHash = localHash;
+      entry.configurationName = result.configuration.name;
+      entry.updatedAt = Date.now();
+      updated.push(entry.configurationId);
+    } catch (error) {
+      failed.push(
+        toPushFailure(error, {
+          configurationId: entry.configurationId,
+          directoryName: entry.directoryName,
+          operation: "update",
+        }),
+      );
+    }
   }
 
-  if (conflicts.length > 0) {
-    return {
-      ok: false as const,
-      workspaceRoot,
-      conflicts,
-      updated,
-      skipped,
-    };
+  for (const directoryName of createDirectories) {
+    const configPath = getConfigFilePath(workspaceRoot, directoryName);
+    const localContent = await readFileIfPresent(configPath);
+    if (!localContent) {
+      failed.push({
+        directoryName,
+        operation: "create",
+        reason: "Local config.yml not found",
+      });
+      continue;
+    }
+
+    try {
+      const result = await client.createDeploymentConfiguration({
+        name: directoryName,
+        yaml: localContent,
+      });
+      const configuration = result.configuration;
+      manifest.entries[configuration.id] = {
+        configurationId: configuration.id,
+        configurationName: configuration.name,
+        directoryName,
+        lastPulledRemoteHash: getConfigurationHash(configuration),
+        lastLocalHash: computeLocalHash(localContent),
+        updatedAt: Date.now(),
+      };
+      created.push(configuration.id);
+    } catch (error) {
+      failed.push(
+        toPushFailure(error, {
+          directoryName,
+          operation: "create",
+        }),
+      );
+    }
+  }
+
+  for (const entry of deleteTargets) {
+    try {
+      const result = await client.deleteDeploymentConfiguration(entry.configurationId);
+      if (!result.ok) {
+        failed.push({
+          configurationId: entry.configurationId,
+          directoryName: entry.directoryName,
+          operation: "delete",
+          reason: result.message ?? "Failed to delete configuration",
+          code: result.code,
+        });
+        continue;
+      }
+
+      delete manifest.entries[entry.configurationId];
+      deleted.push(entry.configurationId);
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        (error.status === 404 || error.code === "CONFIGURATION_NOT_FOUND")
+      ) {
+        delete manifest.entries[entry.configurationId];
+        deleted.push(entry.configurationId);
+        continue;
+      }
+
+      failed.push(
+        toPushFailure(error, {
+          configurationId: entry.configurationId,
+          directoryName: entry.directoryName,
+          operation: "delete",
+        }),
+      );
+    }
   }
 
   manifest.updatedAt = Date.now();
   await saveWorkspaceManifest(manifestPath, manifest);
 
+  const ok = conflicts.length === 0 && failed.length === 0;
   return {
-    ok: true as const,
+    ok,
     workspaceRoot,
-    conflicts: [] as WorkspaceConflict[],
+    conflicts,
     updated,
+    created,
+    deleted,
     skipped,
+    failed,
   };
 }
 
