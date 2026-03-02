@@ -55,6 +55,24 @@ export type DeploymentConfiguration = {
   resource_count: number;
   created_at: number;
   updated_at: number;
+  latest_pushed_version_id?: string | null;
+  latest_pushed_version_number?: number | null;
+  latest_pushed_spec_hash?: string | null;
+  latest_pushed_at?: number | null;
+};
+
+export type DeploymentConfigurationVersion = {
+  id: string;
+  configuration_id: string;
+  version_number: number;
+  spec_hash: string;
+  resource_count: number;
+  pushed_by: string;
+  pushed_at: number;
+  push_message?: string | null;
+  base_version_id: string | null;
+  yaml?: string;
+  spec?: unknown;
 };
 
 export type ListConfigurationsResponse = {
@@ -87,12 +105,50 @@ export type DeleteConfigurationResponse = {
   };
 };
 
+export type PushConfigurationVersionResponse = {
+  ok: boolean;
+  created: boolean;
+  version: DeploymentConfigurationVersion;
+};
+
+export type ListConfigurationVersionsResponse = {
+  versions: DeploymentConfigurationVersion[];
+  count: number;
+  next_cursor?: string | null;
+};
+
+export type GetConfigurationVersionResponse = {
+  version: DeploymentConfigurationVersion;
+};
+
+export type DiffConfigurationVersionsResponse = {
+  ok: boolean;
+  from: DeploymentConfigurationVersion | null;
+  to: DeploymentConfigurationVersion;
+  diff: {
+    unified: string;
+    truncated: boolean;
+    stats: {
+      added: number;
+      removed: number;
+    };
+  };
+  has_changes: boolean;
+};
+
 export type DeployApplyResponse = {
   ok: boolean;
+  push?: {
+    created: boolean;
+    version_id: string;
+    version_number: number;
+  };
   run: {
     id: string;
     status: DeploymentRunStatus;
     configuration_id: string;
+    configuration_version_id?: string | null;
+    configuration_version_number?: number | null;
     resource_count: number;
     queue_position: number | null;
     created_at: number;
@@ -132,6 +188,8 @@ export type DeployRunDetails = {
     status: DeploymentRunStatus;
     stage: DeploymentRunStage;
     configuration_id: string;
+    configuration_version_id?: string | null;
+    configuration_version_number?: number | null;
     spec_hash: string;
     resource_count: number;
     queue_position: number | null;
@@ -202,7 +260,7 @@ export type WorkspaceConflict = {
 export type WorkspacePushFailure = {
   configurationId?: string;
   directoryName: string;
-  operation: "create" | "update" | "delete";
+  operation: "create" | "update" | "delete" | "push";
   reason: string;
   code?: string;
   validationIssues?: Array<{

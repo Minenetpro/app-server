@@ -6,7 +6,16 @@ import {
   saveDaemonInfo,
   saveState,
 } from "./paths";
-import { deployWorkspace, getRunStatus, pullWorkspace, pushWorkspace, workspaceStatus } from "./workspace";
+import {
+  deployWorkspace,
+  getRunStatus,
+  pullWorkspace,
+  pushWorkspace,
+  WorkspaceRequestError,
+  workspaceDiff,
+  workspaceStatus,
+  workspaceVersions,
+} from "./workspace";
 import type { JsonObject, LocalState, StoredProfile } from "./types";
 
 const DEFAULT_API_BASE_URL =
@@ -26,7 +35,24 @@ function normalizeBaseUrl(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) {
     return DEFAULT_API_BASE_URL;
   }
-  return value.trim().replace(/\/+$/, "");
+  let normalized = value.trim().replace(/\/+$/, "");
+  if (/\/api$/i.test(normalized)) {
+    normalized = normalized.replace(/\/api$/i, "");
+  }
+  return normalized || DEFAULT_API_BASE_URL;
+}
+
+function normalizeBaseUrlOverride(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  const normalized = normalizeBaseUrl(value);
+  return normalized || null;
+}
+
+function resolveRequestApiBaseUrl(req: Request, profile: StoredProfile): string {
+  const override = normalizeBaseUrlOverride(req.headers.get("x-minenet-api-base-url"));
+  return override ?? normalizeBaseUrl(profile.apiBaseUrl);
 }
 
 async function parseJson(req: Request): Promise<JsonObject> {
@@ -65,6 +91,16 @@ function isAuthorized(req: Request, daemonToken: string): boolean {
 }
 
 function handleError(error: unknown): Response {
+  if (error instanceof WorkspaceRequestError) {
+    return jsonResponse(
+      {
+        error: error.message,
+        code: error.code,
+      },
+      error.status,
+    );
+  }
+
   if (error instanceof ApiError) {
     return jsonResponse(
       {
@@ -107,9 +143,17 @@ export async function startServer() {
       try {
         if (pathname === "/v1/auth/status" && req.method === "GET") {
           const state = await loadState();
+          const profile = getCurrentProfile(state);
+          const resolvedProfile =
+            profile === null
+              ? null
+              : {
+                  ...profile,
+                  apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+                };
           return jsonResponse({
-            authenticated: Boolean(getCurrentProfile(state)),
-            profile: serializeProfile(getCurrentProfile(state)),
+            authenticated: Boolean(resolvedProfile),
+            profile: serializeProfile(resolvedProfile),
           });
         }
 
@@ -217,9 +261,13 @@ export async function startServer() {
           if (!profile) {
             return jsonResponse({ error: "Not logged in" }, 401);
           }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
 
           const result = await pullWorkspace({
-            profile,
+            profile: requestProfile,
             cwd: typeof body.cwd === "string" ? body.cwd : process.cwd(),
             workspacePath:
               typeof body.workspacePath === "string" ? body.workspacePath : undefined,
@@ -240,14 +288,42 @@ export async function startServer() {
           if (!profile) {
             return jsonResponse({ error: "Not logged in" }, 401);
           }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
+
+          let pushMessage: string | undefined;
+          if (body.message !== undefined) {
+            if (typeof body.message !== "string") {
+              return jsonResponse(
+                { error: "message must be a string", code: "INVALID_PUSH_MESSAGE" },
+                400,
+              );
+            }
+            const trimmed = body.message.trim();
+            if (trimmed.length > 1000) {
+              return jsonResponse(
+                {
+                  error: "Push message cannot exceed 1000 characters",
+                  code: "INVALID_PUSH_MESSAGE",
+                },
+                400,
+              );
+            }
+            if (trimmed.length > 0) {
+              pushMessage = trimmed;
+            }
+          }
 
           const result = await pushWorkspace({
-            profile,
+            profile: requestProfile,
             cwd: typeof body.cwd === "string" ? body.cwd : process.cwd(),
             workspacePath:
               typeof body.workspacePath === "string" ? body.workspacePath : undefined,
             selector: typeof body.selector === "string" ? body.selector : undefined,
             force: Boolean(body.force),
+            pushMessage,
           });
 
           if (!result.ok) {
@@ -264,9 +340,13 @@ export async function startServer() {
           if (!profile) {
             return jsonResponse({ error: "Not logged in" }, 401);
           }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
 
           const result = await deployWorkspace({
-            profile,
+            profile: requestProfile,
             cwd: typeof body.cwd === "string" ? body.cwd : process.cwd(),
             workspacePath:
               typeof body.workspacePath === "string" ? body.workspacePath : undefined,
@@ -283,15 +363,68 @@ export async function startServer() {
           if (!profile) {
             return jsonResponse({ error: "Not logged in" }, 401);
           }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
 
           const status = await workspaceStatus({
-            profile,
+            profile: requestProfile,
             cwd: typeof body.cwd === "string" ? body.cwd : process.cwd(),
             workspacePath:
               typeof body.workspacePath === "string" ? body.workspacePath : undefined,
           });
 
           return jsonResponse(status);
+        }
+
+        if (pathname === "/v1/workspace/versions" && req.method === "POST") {
+          const body = await parseJson(req);
+          const state = await loadState();
+          const profile = getCurrentProfile(state);
+          if (!profile) {
+            return jsonResponse({ error: "Not logged in" }, 401);
+          }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
+
+          const result = await workspaceVersions({
+            profile: requestProfile,
+            cwd: typeof body.cwd === "string" ? body.cwd : process.cwd(),
+            workspacePath:
+              typeof body.workspacePath === "string" ? body.workspacePath : undefined,
+            selector: typeof body.selector === "string" ? body.selector : undefined,
+            limit: typeof body.limit === "number" ? body.limit : undefined,
+          });
+
+          return jsonResponse(result);
+        }
+
+        if (pathname === "/v1/workspace/diff" && req.method === "POST") {
+          const body = await parseJson(req);
+          const state = await loadState();
+          const profile = getCurrentProfile(state);
+          if (!profile) {
+            return jsonResponse({ error: "Not logged in" }, 401);
+          }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
+
+          const result = await workspaceDiff({
+            profile: requestProfile,
+            cwd: typeof body.cwd === "string" ? body.cwd : process.cwd(),
+            workspacePath:
+              typeof body.workspacePath === "string" ? body.workspacePath : undefined,
+            selector: typeof body.selector === "string" ? body.selector : undefined,
+            from: typeof body.from === "string" ? body.from : undefined,
+            to: typeof body.to === "string" ? body.to : undefined,
+          });
+
+          return jsonResponse(result);
         }
 
         if (pathname.startsWith("/v1/deploy/runs/") && req.method === "GET") {
@@ -305,9 +438,13 @@ export async function startServer() {
           if (!profile) {
             return jsonResponse({ error: "Not logged in" }, 401);
           }
+          const requestProfile = {
+            ...profile,
+            apiBaseUrl: resolveRequestApiBaseUrl(req, profile),
+          };
 
           const result = await getRunStatus({
-            profile,
+            profile: requestProfile,
             runId,
           });
 

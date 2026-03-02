@@ -4,11 +4,15 @@ import type {
   DeployApplyResponse,
   DeployRunDetails,
   DeploymentConfiguration,
+  DiffConfigurationVersionsResponse,
   DevicePollError,
   DevicePollSuccess,
   DeviceStartResponse,
+  GetConfigurationVersionResponse,
   GetConfigurationResponse,
+  ListConfigurationVersionsResponse,
   ListConfigurationsResponse,
+  PushConfigurationVersionResponse,
   UpdateConfigurationResponse,
 } from "./types";
 
@@ -44,6 +48,90 @@ type RequestOptions = {
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function pickFirstNonEmptyString(values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function extractErrorMessage(payload: unknown, status: number): string {
+  if (typeof payload === "string" && payload.trim()) {
+    return payload;
+  }
+
+  if (!isRecord(payload)) {
+    return `Request failed (${status})`;
+  }
+
+  const details = isRecord(payload.details) ? payload.details : null;
+  const nestedError = details && isRecord(details.error) ? details.error : null;
+
+  const message = pickFirstNonEmptyString([
+    payload.error,
+    payload.message,
+    payload.error_description,
+    payload.reason,
+    details?.error,
+    details?.message,
+    details?.error_description,
+    details?.reason,
+    nestedError?.message,
+    nestedError?.error,
+  ]);
+  if (message) {
+    return message;
+  }
+
+  const issues =
+    (Array.isArray(payload.issues) ? payload.issues : null) ??
+    (details && Array.isArray(details.issues) ? details.issues : null) ??
+    (details && Array.isArray(details.errors) ? details.errors : null);
+  if (issues && issues.length > 0) {
+    const first = issues[0];
+    if (typeof first === "string" && first.trim()) {
+      return first;
+    }
+
+    if (isRecord(first)) {
+      const issueMessage = pickFirstNonEmptyString([
+        first.message,
+        first.error,
+        first.reason,
+      ]);
+      if (issueMessage) {
+        return issueMessage;
+      }
+    }
+  }
+
+  return `Request failed (${status})`;
+}
+
+function extractErrorCode(payload: unknown): string | null {
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (typeof payload.code === "string" && payload.code.trim()) {
+    return payload.code;
+  }
+
+  const details = isRecord(payload.details) ? payload.details : null;
+  if (details && typeof details.code === "string" && details.code.trim()) {
+    return details.code;
+  }
+
+  return null;
 }
 
 export class MinenetApiClient {
@@ -96,14 +184,8 @@ export class MinenetApiClient {
     }
 
     if (!response.ok) {
-      const message =
-        typeof payload === "object" && payload && "error" in payload
-          ? String((payload as Record<string, unknown>).error)
-          : `Request failed (${response.status})`;
-      const code =
-        typeof payload === "object" && payload && "code" in payload
-          ? String((payload as Record<string, unknown>).code)
-          : null;
+      const message = extractErrorMessage(payload, response.status);
+      const code = extractErrorCode(payload);
 
       throw new ApiError(message, response.status, code, payload, retryAfterSeconds);
     }
@@ -209,6 +291,70 @@ export class MinenetApiClient {
     return this.request<DeleteConfigurationResponse>(
       `/api/client/v1/deployments/configurations/${configurationId}`,
       { method: "DELETE" },
+    );
+  }
+
+  async pushDeploymentConfigurationVersion(input: {
+    configurationId: string;
+    pushMessage?: string;
+  }): Promise<PushConfigurationVersionResponse> {
+    const body =
+      typeof input.pushMessage === "string" && input.pushMessage.trim().length > 0
+        ? { push_message: input.pushMessage.trim() }
+        : undefined;
+
+    return this.request<PushConfigurationVersionResponse>(
+      `/api/client/v1/deployments/configurations/${input.configurationId}/push`,
+      {
+        method: "POST",
+        body,
+      },
+    );
+  }
+
+  async listDeploymentConfigurationVersions(input: {
+    configurationId: string;
+    limit?: number;
+  }): Promise<ListConfigurationVersionsResponse> {
+    const limitParam =
+      typeof input.limit === "number" && Number.isFinite(input.limit)
+        ? `?limit=${Math.max(1, Math.min(Math.trunc(input.limit), 200))}`
+        : "";
+    return this.request<ListConfigurationVersionsResponse>(
+      `/api/client/v1/deployments/configurations/${input.configurationId}/versions${limitParam}`,
+      { method: "GET" },
+    );
+  }
+
+  async getDeploymentConfigurationVersion(input: {
+    configurationId: string;
+    versionId: string;
+  }): Promise<GetConfigurationVersionResponse> {
+    return this.request<GetConfigurationVersionResponse>(
+      `/api/client/v1/deployments/configurations/${input.configurationId}/versions/${input.versionId}`,
+      { method: "GET" },
+    );
+  }
+
+  async diffDeploymentConfigurationVersions(input: {
+    configurationId: string;
+    from?: string;
+    to?: string;
+  }): Promise<DiffConfigurationVersionsResponse> {
+    const searchParams = new URLSearchParams();
+    if (input.from) {
+      searchParams.set("from", input.from);
+    }
+    if (input.to) {
+      searchParams.set("to", input.to);
+    }
+
+    const query = searchParams.toString();
+    return this.request<DiffConfigurationVersionsResponse>(
+      `/api/client/v1/deployments/configurations/${input.configurationId}/versions/diff${
+        query ? `?${query}` : ""
+      }`,
+      { method: "GET" },
     );
   }
 

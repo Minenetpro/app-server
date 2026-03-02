@@ -16,6 +16,18 @@ import type {
   WorkspacePushFailure,
 } from "./types";
 
+export class WorkspaceRequestError extends Error {
+  status: number;
+  code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "WorkspaceRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 function ensureTrailingNewline(value: string): string {
   return value.endsWith("\n") ? value : `${value}\n`;
 }
@@ -294,40 +306,104 @@ function resolveLocalDirectoryTargets(
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function parseValidationIssueArray(
+  value: unknown,
+): Array<{ path?: string; message: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const parsed: Array<{ path?: string; message: string }> = [];
+  for (const issue of value) {
+    if (typeof issue === "string" && issue.trim()) {
+      parsed.push({ message: issue });
+      continue;
+    }
+
+    if (!isRecord(issue)) {
+      continue;
+    }
+
+    const messageCandidate =
+      (typeof issue.message === "string" && issue.message.trim()
+        ? issue.message
+        : null) ??
+      (typeof issue.error === "string" && issue.error.trim() ? issue.error : null) ??
+      (typeof issue.reason === "string" && issue.reason.trim() ? issue.reason : null);
+
+    if (!messageCandidate) {
+      continue;
+    }
+
+    const pathCandidate =
+      (typeof issue.path === "string" && issue.path.trim() ? issue.path : null) ??
+      (typeof issue.field === "string" && issue.field.trim() ? issue.field : null);
+
+    parsed.push({
+      message: messageCandidate,
+      ...(pathCandidate ? { path: pathCandidate } : {}),
+    });
+  }
+
+  return parsed;
+}
+
+function extractValidationIssues(
+  details: unknown,
+): WorkspacePushFailure["validationIssues"] {
+  if (!isRecord(details)) {
+    return undefined;
+  }
+
+  const queue: unknown[] = [details];
+  const seen = new Set<unknown>();
+  const collected: Array<{ path?: string; message: string }> = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) {
+      continue;
+    }
+
+    seen.add(current);
+
+    for (const key of ["issues", "validation_issues", "validationIssues", "errors"] as const) {
+      collected.push(...parseValidationIssueArray(current[key]));
+    }
+
+    for (const key of ["details", "error", "data"] as const) {
+      const nested = current[key];
+      if (isRecord(nested)) {
+        queue.push(nested);
+      }
+    }
+  }
+
+  if (collected.length === 0) {
+    return undefined;
+  }
+
+  const deduped = new Map<string, { path?: string; message: string }>();
+  for (const issue of collected) {
+    const key = `${issue.path ?? ""}|${issue.message}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, issue);
+    }
+  }
+
+  return [...deduped.values()];
+}
+
 function toPushFailure(
   error: unknown,
   base: Omit<WorkspacePushFailure, "reason" | "code">,
 ): WorkspacePushFailure {
   if (error instanceof ApiError) {
-    let validationIssues: WorkspacePushFailure["validationIssues"];
-    if (
-      error.details &&
-      typeof error.details === "object" &&
-      "issues" in error.details &&
-      Array.isArray((error.details as { issues?: unknown }).issues)
-    ) {
-      const parsedIssues = (error.details as { issues: unknown[] }).issues
-        .map((issue) => {
-          if (!issue || typeof issue !== "object") {
-            return null;
-          }
-
-          const record = issue as Record<string, unknown>;
-          if (typeof record.message !== "string") {
-            return null;
-          }
-
-          return {
-            path: typeof record.path === "string" ? record.path : undefined,
-            message: record.message,
-          };
-        })
-        .filter((issue): issue is { path?: string; message: string } => Boolean(issue));
-
-      if (parsedIssues.length > 0) {
-        validationIssues = parsedIssues;
-      }
-    }
+    const validationIssues = extractValidationIssues(error.details);
 
     return {
       ...base,
@@ -356,6 +432,7 @@ export async function pushWorkspace(input: {
   workspacePath?: string;
   selector?: string;
   force: boolean;
+  pushMessage?: string;
 }) {
   const workspaceRoot = normalizeWorkspaceRoot(
     input.cwd,
@@ -377,6 +454,10 @@ export async function pushWorkspace(input: {
     localConfigDirectories,
     input.selector,
   );
+  const normalizedPushMessage =
+    typeof input.pushMessage === "string" && input.pushMessage.trim().length > 0
+      ? input.pushMessage.trim()
+      : undefined;
 
   if (
     input.selector &&
@@ -408,6 +489,14 @@ export async function pushWorkspace(input: {
   const deleted: string[] = [];
   const skipped: string[] = [];
   const failed: WorkspacePushFailure[] = [];
+  const pushed: Array<{
+    configurationId: string;
+    directoryName: string;
+    versionId: string;
+    versionNumber: number;
+    created: boolean;
+    pushMessage?: string | null;
+  }> = [];
 
   for (const entry of updateTargets) {
     const configPath = getConfigFilePath(workspaceRoot, entry.directoryName);
@@ -419,9 +508,18 @@ export async function pushWorkspace(input: {
 
     const localHash = computeLocalHash(localContent);
     let remoteHash: string;
+    let needsVersionPush = false;
     try {
       const remote = await client.getDeploymentConfiguration(entry.configurationId);
       remoteHash = getConfigurationHash(remote.configuration);
+      const latestPushedSpecHash =
+        typeof remote.configuration.latest_pushed_spec_hash === "string" &&
+        remote.configuration.latest_pushed_spec_hash.trim().length > 0
+          ? remote.configuration.latest_pushed_spec_hash
+          : null;
+      needsVersionPush =
+        !remote.configuration.latest_pushed_version_id ||
+        latestPushedSpecHash !== remoteHash;
     } catch (error) {
       failed.push(
         toPushFailure(error, {
@@ -447,7 +545,33 @@ export async function pushWorkspace(input: {
       entry.lastLocalHash === localHash &&
       entry.lastPulledRemoteHash === remoteHash
     ) {
-      skipped.push(entry.configurationId);
+      if (!needsVersionPush) {
+        skipped.push(entry.configurationId);
+        continue;
+      }
+
+      try {
+        const pushedResult = await client.pushDeploymentConfigurationVersion({
+          configurationId: entry.configurationId,
+          pushMessage: normalizedPushMessage,
+        });
+        pushed.push({
+          configurationId: entry.configurationId,
+          directoryName: entry.directoryName,
+          versionId: pushedResult.version.id,
+          versionNumber: pushedResult.version.version_number,
+          created: pushedResult.created,
+          pushMessage: pushedResult.version.push_message ?? null,
+        });
+      } catch (error) {
+        failed.push(
+          toPushFailure(error, {
+            configurationId: entry.configurationId,
+            directoryName: entry.directoryName,
+            operation: "push",
+          }),
+        );
+      }
       continue;
     }
 
@@ -463,6 +587,29 @@ export async function pushWorkspace(input: {
       entry.configurationName = result.configuration.name;
       entry.updatedAt = Date.now();
       updated.push(entry.configurationId);
+
+      try {
+        const pushedResult = await client.pushDeploymentConfigurationVersion({
+          configurationId: entry.configurationId,
+          pushMessage: normalizedPushMessage,
+        });
+        pushed.push({
+          configurationId: entry.configurationId,
+          directoryName: entry.directoryName,
+          versionId: pushedResult.version.id,
+          versionNumber: pushedResult.version.version_number,
+          created: pushedResult.created,
+          pushMessage: pushedResult.version.push_message ?? null,
+        });
+      } catch (error) {
+        failed.push(
+          toPushFailure(error, {
+            configurationId: entry.configurationId,
+            directoryName: entry.directoryName,
+            operation: "push",
+          }),
+        );
+      }
     } catch (error) {
       failed.push(
         toPushFailure(error, {
@@ -501,6 +648,29 @@ export async function pushWorkspace(input: {
         updatedAt: Date.now(),
       };
       created.push(configuration.id);
+
+      try {
+        const pushedResult = await client.pushDeploymentConfigurationVersion({
+          configurationId: configuration.id,
+          pushMessage: normalizedPushMessage,
+        });
+        pushed.push({
+          configurationId: configuration.id,
+          directoryName,
+          versionId: pushedResult.version.id,
+          versionNumber: pushedResult.version.version_number,
+          created: pushedResult.created,
+          pushMessage: pushedResult.version.push_message ?? null,
+        });
+      } catch (error) {
+        failed.push(
+          toPushFailure(error, {
+            configurationId: configuration.id,
+            directoryName,
+            operation: "push",
+          }),
+        );
+      }
     } catch (error) {
       failed.push(
         toPushFailure(error, {
@@ -559,7 +729,120 @@ export async function pushWorkspace(input: {
     created,
     deleted,
     skipped,
+    pushed,
     failed,
+  };
+}
+
+export async function workspaceVersions(input: {
+  profile: StoredProfile;
+  cwd: string;
+  workspacePath?: string;
+  selector?: string;
+  limit?: number;
+}) {
+  const workspaceRoot = normalizeWorkspaceRoot(
+    input.cwd,
+    input.workspacePath,
+    input.profile.teamSlug,
+  );
+  const manifestPath = getManifestPath(workspaceRoot);
+  const manifest = await loadWorkspaceManifest(manifestPath);
+
+  if (!manifest) {
+    throw new WorkspaceRequestError(
+      "Workspace manifest not found. Run `minenet pull` first.",
+      409,
+      "WORKSPACE_MANIFEST_MISSING",
+    );
+  }
+
+  const targets = resolveTargets(manifest, input.selector);
+  if (targets.length === 0) {
+    throw new WorkspaceRequestError(
+      "No matching configurations found in workspace.",
+      404,
+      "WORKSPACE_CONFIGURATION_NOT_FOUND",
+    );
+  }
+
+  const client = createApiClient(input.profile.apiBaseUrl, input.profile.token);
+  const versions = await Promise.all(
+    targets.map(async (target) => {
+      const result = await client.listDeploymentConfigurationVersions({
+        configurationId: target.configurationId,
+        limit: input.limit,
+      });
+      return {
+        configurationId: target.configurationId,
+        configurationName: target.configurationName,
+        directoryName: target.directoryName,
+        versions: result.versions,
+        count: result.count,
+      };
+    }),
+  );
+
+  return {
+    workspaceRoot,
+    versions,
+  };
+}
+
+export async function workspaceDiff(input: {
+  profile: StoredProfile;
+  cwd: string;
+  workspacePath?: string;
+  selector?: string;
+  from?: string;
+  to?: string;
+}) {
+  const workspaceRoot = normalizeWorkspaceRoot(
+    input.cwd,
+    input.workspacePath,
+    input.profile.teamSlug,
+  );
+  const manifestPath = getManifestPath(workspaceRoot);
+  const manifest = await loadWorkspaceManifest(manifestPath);
+
+  if (!manifest) {
+    throw new WorkspaceRequestError(
+      "Workspace manifest not found. Run `minenet pull` first.",
+      409,
+      "WORKSPACE_MANIFEST_MISSING",
+    );
+  }
+
+  const targets = resolveTargets(manifest, input.selector);
+  if (targets.length === 0) {
+    throw new WorkspaceRequestError(
+      "No matching configurations found in workspace.",
+      404,
+      "WORKSPACE_CONFIGURATION_NOT_FOUND",
+    );
+  }
+  if (targets.length > 1) {
+    throw new WorkspaceRequestError(
+      "Multiple configurations match. Use --config to target one.",
+      400,
+      "WORKSPACE_CONFIGURATION_AMBIGUOUS",
+    );
+  }
+
+  const target = targets[0]!;
+  const client = createApiClient(input.profile.apiBaseUrl, input.profile.token);
+  const diff = await client.diffDeploymentConfigurationVersions({
+    configurationId: target.configurationId,
+    from: input.from,
+    to: input.to,
+  });
+
+  return {
+    workspaceRoot,
+    configurationId: target.configurationId,
+    configurationName: target.configurationName,
+    directoryName: target.directoryName,
+    ...diff,
   };
 }
 

@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## v1.0.6 - 2026-03-02
+
+### Added
+- Added workspace version-history endpoint:
+  - `POST /v1/workspace/versions`
+- Added workspace version-diff endpoint:
+  - `POST /v1/workspace/diff`
+- Added support for per-command API base override via daemon header (`x-minenet-api-base-url`) across auth/workspace/deploy routes.
+
+### Changed
+- `pushWorkspace` now creates/reuses pushed deployment versions and returns detailed `pushed` entries.
+- Workspace push now accepts optional `message` and forwards it as deployment push message.
+- Expanded API error extraction to surface nested error messages and codes.
+- Updated dev script watch invocation to `bun run --watch index.ts`.
+
+### Fixed
+- Fixed workspace push retry behavior by detecting pushed-version drift using `latest_pushed_spec_hash`.
+- Added explicit 4xx workspace request errors for missing manifest, no matches, and ambiguous `--config` matches (instead of generic 500s).
+- Expanded validation-issue extraction from nested API error payloads for clearer push failure reporting.
+
+### Agent Notes
+- Keep daemon route contracts and CLI expectations aligned for `push`, `versions`, `diff`, and deploy-from-pushed-version behavior.
+- If `minenet-pro` deployment version response shapes change, update `src/types.ts`, `src/api.ts`, and `src/workspace.ts` together.
+
 ## v1.0.5 - 2026-02-26
 
 ### Added
